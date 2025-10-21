@@ -2,9 +2,10 @@
 """
 Мониторинг изменений комиссий/логистики для РФ (Ozon RU, Я.Маркет RU, WB RU).
 Особенности:
-- Для доменов Ozon используем cloudscraper (обход 403/JS-check).
-- Храним предыдущую версию текста по каждому URL (data/state/<slug>.txt).
-- При изменениях в Telegram уходит "живой" дайджест: короткий diff (добавлено/удалено).
+- Для доменов Ozon сначала пробуем cloudscraper;
+- Если получаем 403/5xx — автоматически используем запасной текстовый ридер r.jina.ai;
+- Храним предыдущую версию текста по каждому URL (data/state/<slug>.txt);
+- В Telegram уходит "живой" дайджест: короткий diff (добавлено/удалено).
 """
 
 from __future__ import annotations
@@ -26,7 +27,7 @@ DATA_DIR.mkdir(exist_ok=True)
 STATE_DIR.mkdir(exist_ok=True)
 
 URLS_FILE = DATA_DIR / "urls.json"
-HASHES_FILE = DATA_DIR / "last_hash.json"   # оставим для обратной совместимости/коммита
+HASHES_FILE = DATA_DIR / "last_hash.json"   # для совместимости/коммита
 
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
@@ -39,6 +40,7 @@ HEADERS = {
     "Accept-Language": "ru,en;q=0.9",
     "Cache-Control": "no-cache",
     "Pragma": "no-cache",
+    "Referer": "https://seller.ozon.ru/",
 }
 OZON_HOSTS = ("seller.ozon.ru", "seller-edu.ozon.ru")  # RU-источники
 
@@ -64,7 +66,7 @@ def clean_text(html: str) -> str:
     soup = BeautifulSoup(html, "lxml")
     for tag in soup(["script", "style", "noscript"]):
         tag.decompose()
-    # удалим меню и футеры по типовым селекторам, если есть
+    # типовые «хедеры/футеры»
     for sel in ["header", "footer", "nav", ".header", ".footer", ".menu", ".breadcrumbs"]:
         for node in soup.select(sel):
             node.decompose()
@@ -72,7 +74,39 @@ def clean_text(html: str) -> str:
     text = re.sub(r"\n{2,}", "\n", text)
     return text
 
+def fetch_via_jina(url: str) -> str:
+    """
+    Запасной путь: текстовый ридер r.jina.ai (отдаёт уже «раскрытый» текст страницы).
+    Пробуем и http, и https префиксы.
+    """
+    bases = [f"https://r.jina.ai/http://{url}", f"https://r.jina.ai/{url}"]
+    # Если url уже начинается с http/https — не удваиваем
+    if url.startswith("http://") or url.startswith("https://"):
+        bases = [f"https://r.jina.ai/{url}"]
+    last_err = None
+    for u in bases:
+        try:
+            r = requests.get(u, headers=HEADERS, timeout=60)
+            r.raise_for_status()
+            # r.jina.ai уже отдаёт текст; слегка нормализуем
+            txt = r.text
+            txt = re.sub(r"\n{2,}", "\n", txt).strip()
+            if len(txt) > 0:
+                return txt
+        except Exception as e:
+            last_err = e
+            time.sleep(1)
+    if last_err:
+        raise last_err
+    return ""  # на всякий случай
+
 def fetch_page(url: str, selector: Optional[str] = None, retries: int = 3) -> str:
+    """
+    Скачиваем страницу.
+    1) Для Ozon-доменов — cloudscraper (чтобы пройти 403/JS);
+    2) Если получили 403/5xx — пробуем r.jina.ai.
+    3) Для остальных — обычный requests, при ошибке тоже fallback на r.jina.ai.
+    """
     use_cloud = any(h in url for h in OZON_HOSTS)
     session = cloudscraper.create_scraper(
         browser={"browser": "chrome", "platform": "windows", "mobile": False}
@@ -88,8 +122,23 @@ def fetch_page(url: str, selector: Optional[str] = None, retries: int = 3) -> st
                 node = BeautifulSoup(html, "lxml").select_one(selector)
                 html = str(node) if node else html
             return clean_text(html)
+        except requests.HTTPError as e:
+            status = getattr(e.response, "status_code", None)
+            last_err = e
+            # 403/5xx — сразу уходим на fallback
+            if status in (401, 403, 429, 500, 502, 503, 504):
+                try:
+                    return fetch_via_jina(url)
+                except Exception as e2:
+                    last_err = e2
+            time.sleep(1 + attempt)
         except Exception as e:
             last_err = e
+            # общий fallback
+            try:
+                return fetch_via_jina(url)
+            except Exception as e2:
+                last_err = e2
             time.sleep(1 + attempt)
     raise last_err  # type: ignore[misc]
 
@@ -103,12 +152,12 @@ def tg_send(message: str) -> None:
     r = requests.post(url, json=payload, timeout=30)
     r.raise_for_status()
 
-def diff_preview(old: str, new: str, max_lines: int = 10, max_line_len: int = 180) -> str:
+def diff_preview(old: str, new: str, max_lines: int = 12, max_line_len: int = 200) -> str:
     """
-    Формируем компактный diff-превью:
-    - показываем только изменённые строки,
-    - помечаем добавления ➕ и удаления ➖,
-    - обрезаем очень длинные строки.
+    Компактный diff-превью:
+    - только изменённые строки,
+    - ➕ добавления / ➖ удаления,
+    - длинные строки обрезаем.
     """
     out: List[str] = []
     d = difflib.ndiff(old.splitlines(), new.splitlines())
@@ -122,7 +171,7 @@ def diff_preview(old: str, new: str, max_lines: int = 10, max_line_len: int = 18
         if len(out) >= max_lines:
             break
     if not out:
-        return "— Изменения есть, но они не попали в короткое превью (косметические правки)."
+        return "— Изменения есть, но не попали в короткое превью (незначительные правки форматирования)."
     return "\n".join(out)
 
 # ─────────────────────────── main ───────────────────────────
@@ -161,7 +210,7 @@ def main() -> None:
             hashes[url] = digest
 
             # сформируем превью diff
-            preview = diff_preview(prev_content, content, max_lines=10, max_line_len=180)
+            preview = diff_preview(prev_content, content, max_lines=12, max_line_len=200)
             block = (
                 f"🔄 <b>{name}</b>\n"
                 f"{preview}\n"
@@ -169,7 +218,7 @@ def main() -> None:
             )
             changes_blocks.append(block)
 
-    # сохраняем хэши (нужно для коммита в репо и будущих сравнений)
+    # сохраняем хэши (для коммита и будущих сравнений)
     save_json(HASHES_FILE, hashes)
 
     # отправляем отчёт
@@ -177,7 +226,6 @@ def main() -> None:
     header = f"🧭 Обновления комиссий/логистики (RU)\n<code>{ts}</code>\n"
 
     if changes_blocks:
-        # делим на части, чтобы не превысить лимит 4096 символов
         full = header + "\n\n".join(changes_blocks)
         for i in range(0, len(full), 4000):
             tg_send(full[i:i+4000])
