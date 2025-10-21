@@ -1,0 +1,25 @@
+name: Telegram Ping (one-off test)
+
+on:
+  workflow_dispatch: {}   # запуск вручную из вкладки Actions
+
+jobs:
+  ping:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check secrets presence (safe)
+        run: |
+          if [ -z "${{ secrets.TELEGRAM_BOT_TOKEN }}" ]; then echo "❌ TELEGRAM_BOT_TOKEN is EMPTY"; exit 1; else echo "✅ TELEGRAM_BOT_TOKEN exists"; fi
+          if [ -z "${{ secrets.TELEGRAM_CHAT_ID }}" ]; then echo "❌ TELEGRAM_CHAT_ID is EMPTY"; exit 1; else echo "✅ TELEGRAM_CHAT_ID exists"; fi
+
+      - name: Send test message to Telegram
+        env:
+          TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: |
+          set -e
+          MSG="🚀 Тест: GitHub Actions пишет в Telegram (ping)."
+          curl -sS -X POST "https://api.telegram.org/bot${TOKEN}/sendMessage" \
+            -H "Content-Type: application/json" \
+            -d "{\"chat_id\":\"${CHAT_ID}\",\"text\":\"${MSG}\",\"disable_web_page_preview\":true}" \
+            | jq -r '.ok, .description // empty' || true
