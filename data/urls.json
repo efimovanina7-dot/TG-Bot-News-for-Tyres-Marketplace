@@ -1,0 +1,7 @@
+[
+  { "name": "Ozon — Комиссии и тарифы (docs)", "url": "https://docs.ozon.ru/global/commissions/ozon-fees/", "selector": "main" },
+  { "name": "Ozon — Новости для продавцов", "url": "https://seller.ozon.ru/media/news/", "selector": "main" },
+  { "name": "Яндекс.Маркет — Взаиморасчёты и стоимость услуг", "url": "https://yandex.ru/support/marketplace/ru/introduction/rates/", "selector": "main" },
+  { "name": "Яндекс.Маркет — Тарифы FBS", "url": "https://yandex.ru/support/marketplace/ru/introduction/rates/models/fbs", "selector": "main" },
+  { "name": "Wildberries — Штрафы/удержания (инструкция)", "url": "https://seller.wildberries.ru/instructions/ru/ru/material/A-71?recommended=true", "selector": "main" }
+]
